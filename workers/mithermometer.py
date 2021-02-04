@@ -4,6 +4,7 @@ from mqtt import MqttMessage, MqttConfigMessage
 from interruptingcow import timeout
 
 from workers.base import BaseWorker
+import json
 import logger
 
 REQUIREMENTS = ["mithermometer==0.1.4", "bluepy"]
@@ -98,13 +99,11 @@ class MithermometerWorker(BaseWorker):
                 )
 
     def update_device_state(self, name, poller):
-        ret = []
         poller.clear_cache()
-        for attr in monitoredAttrs:
-            ret.append(
-                MqttMessage(
-                    topic=self.format_topic(name, attr),
-                    payload=poller.parameter_value(attr),
-                )
-            )
-        return ret
+
+        ret = {
+            "temperature": poller.parameter_value("temperature"),
+            "humidity": poller.parameter_value("humidity"),
+            "battery": poller.parameter_value("battery"),
+        }
+        return [MqttMessage(topic=self.format_topic(name), payload=json.dumps(ret))]

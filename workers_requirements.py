@@ -50,7 +50,7 @@ def verify():
             _LOGGER.error('  %s', error)
         _LOGGER.error('You may install those with pip: python -m pip install %s',
                       ' '.join(requirements))
-        exit(1)
+        #exit(1)
 
 
 def _get_requirements(workers):
