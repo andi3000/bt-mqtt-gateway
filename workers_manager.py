@@ -7,7 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from interruptingcow import timeout
 from pytz import utc
 
-from const import DEFAULT_COMMAND_TIMEOUT
+from const import DEFAULT_COMMAND_TIMEOUT, DEFAULT_COMMAND_RETRIES, DEFAULT_UPDATE_RETRIES
 from exceptions import WorkerTimeoutError
 from workers_queue import _WORKERS_QUEUE
 import logger
@@ -57,7 +57,7 @@ class WorkersManager:
             _LOGGER.debug("Execution result of command %s: %s", self._source, messages)
             return messages
 
-    def __init__(self, config):
+    def __init__(self, config, mqtt_config):
         self._mqtt_callbacks = []
         self._config_commands = []
         self._update_commands = []
@@ -65,6 +65,9 @@ class WorkersManager:
         self._daemons = []
         self._config = config
         self._command_timeout = config.get("command_timeout", DEFAULT_COMMAND_TIMEOUT)
+        self._command_retries = config.get("command_retries", DEFAULT_COMMAND_RETRIES)
+        self._update_retries = config.get("update_retries", DEFAULT_UPDATE_RETRIES)
+        self._mqtt = mqtt_config
 
     def register_workers(self, global_topic_prefix):
         for (worker_name, worker_config) in self._config["workers"].items():
@@ -74,15 +77,21 @@ class WorkersManager:
             command_timeout = worker_config.get(
                 "command_timeout", self._command_timeout
             )
+            command_retries = worker_config.get(
+                "command_retries", self._command_retries
+            )
+            update_retries = worker_config.get(
+                "update_retries", self._update_retries
+            )
             worker_obj = klass(
-                command_timeout, global_topic_prefix, **worker_config["args"]
+                command_timeout, command_retries, update_retries, global_topic_prefix, **worker_config["args"]
             )
 
             if "sensor_config" in self._config and hasattr(worker_obj, "config"):
                 _LOGGER.debug(
                     "Added %s config with a %d seconds timeout", repr(worker_obj), 2
                 )
-                command = self.Command(worker_obj.config, 2, [])
+                command = self.Command(worker_obj.config, 2, [self._mqtt.availability_topic])
                 self._config_commands.append(command)
 
             if hasattr(worker_obj, "status_update"):
@@ -140,16 +149,16 @@ class WorkersManager:
                     )
                 )
 
-    def start(self, mqtt):
-        mqtt.callbacks_subscription(self._mqtt_callbacks)
+    def start(self):
+        self._mqtt.callbacks_subscription(self._mqtt_callbacks)
 
         if "sensor_config" in self._config:
-            self._publish_config(mqtt)
+            self._publish_config()
 
         self._scheduler.start()
         self.update_all()
         for daemon in self._daemons:
-            threading.Thread(target=daemon.run, args=[mqtt], daemon=True).start()
+            threading.Thread(target=daemon.run, args=[self._mqtt], daemon=True).start()
 
     def _queue_if_matching_payload(self, command, payload, expected_payload):
         if payload.decode("utf-8") == expected_payload:
@@ -196,7 +205,7 @@ class WorkersManager:
             )
         )
 
-    def _publish_config(self, mqtt):
+    def _publish_config(self):
         for command in self._config_commands:
             messages = command.execute()
             for msg in messages:
@@ -205,4 +214,4 @@ class WorkersManager:
                     msg.topic,
                 )
                 msg.retain = self._config["sensor_config"].get("retain", True)
-            mqtt.publish(messages)
+            self._mqtt.publish(messages)

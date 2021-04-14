@@ -1,6 +1,6 @@
 from mqtt import MqttMessage, MqttConfigMessage
 
-from workers.base import BaseWorker
+from workers.base import BaseWorker, retry
 import logger
 
 REQUIREMENTS = ["python-eq3bt==0.1.11"]
@@ -60,13 +60,13 @@ class ThermostatWorker(BaseWorker):
                 self.devices[name]["mac"],
             )
 
-    def config(self):
+    def config(self, availability_topic):
         ret = []
         for name, data in self.devices.items():
-            ret += self.config_device(name, data)
+            ret += self.config_device(name, data, availability_topic)
         return ret
 
-    def config_device(self, name, data):
+    def config_device(self, name, data, availability_topic):
         ret = []
         mac = data["mac"]
         device = {
@@ -80,6 +80,7 @@ class ThermostatWorker(BaseWorker):
             "unique_id": self.format_discovery_id(mac, name, SENSOR_CLIMATE),
             "name": self.format_discovery_name(name, SENSOR_CLIMATE),
             "qos": 1,
+            "availability_topic": availability_topic,
             "temperature_state_topic": self.format_prefixed_topic(
                 name, SENSOR_TARGET_TEMPERATURE
             ),
@@ -120,6 +121,7 @@ class ThermostatWorker(BaseWorker):
             "unique_id": self.format_discovery_id(mac, name, SENSOR_WINDOW),
             "name": self.format_discovery_name(name, SENSOR_WINDOW),
             "state_topic": self.format_prefixed_topic(name, SENSOR_WINDOW),
+            "availability_topic": availability_topic,
             "device_class": "window",
             "payload_on": "true",
             "payload_off": "false",
@@ -137,6 +139,7 @@ class ThermostatWorker(BaseWorker):
             "unique_id": self.format_discovery_id(mac, name, SENSOR_BATTERY),
             "name": self.format_discovery_name(name, SENSOR_BATTERY),
             "state_topic": self.format_prefixed_topic(name, SENSOR_BATTERY),
+            "availability_topic": availability_topic,
             "device_class": "battery",
             "payload_on": "true",
             "payload_off": "false",
@@ -154,6 +157,7 @@ class ThermostatWorker(BaseWorker):
             "unique_id": self.format_discovery_id(mac, name, SENSOR_LOCKED),
             "name": self.format_discovery_name(name, SENSOR_LOCKED),
             "state_topic": self.format_prefixed_topic(name, SENSOR_LOCKED),
+            "availability_topic": availability_topic,
             "device_class": "lock",
             "payload_on": "false",
             "payload_off": "true",
@@ -171,6 +175,7 @@ class ThermostatWorker(BaseWorker):
             "unique_id": self.format_discovery_id(mac, name, SENSOR_VALVE),
             "name": self.format_discovery_name(name, SENSOR_VALVE),
             "state_topic": self.format_prefixed_topic(name, SENSOR_VALVE),
+            "availability_topic": availability_topic,
             "unit_of_measurement": "%",
             "device": device,
         }
@@ -192,7 +197,7 @@ class ThermostatWorker(BaseWorker):
             _LOGGER.debug("Updating %s device '%s' (%s)", repr(self), name, data["mac"])
             thermostat = data["thermostat"]
             try:
-                thermostat.update()
+                retry(thermostat.update, retries=self.update_retries, exception_type=btle.BTLEException)()
             except btle.BTLEException as e:
                 logger.log_exception(
                     _LOGGER,
@@ -204,7 +209,7 @@ class ThermostatWorker(BaseWorker):
                     suppress=True,
                 )
             else:
-                yield self.present_device_state(name, thermostat)
+                yield retry(self.present_device_state, retries=self.update_retries, exception_type=btle.BTLEException)(name, thermostat)
 
     def on_command(self, topic, value):
         from bluepy import btle
@@ -268,11 +273,11 @@ class ThermostatWorker(BaseWorker):
         try:
             if method == "preset":
                 if value == HOLD_COMFORT:
-                    thermostat.activate_comfort()
+                    retry(thermostat.activate_comfort, retries=self.command_retries, exception_type=btle.BTLEException)()
                 else:
-                    thermostat.activate_eco()
+                    retry(thermostat.activate_eco, retries=self.command_retries, exception_type=btle.BTLEException)()
             else:
-                setattr(thermostat, method, value)
+                retry(setattr, retries=self.command_retries, exception_type=btle.BTLEException)(thermostat, method, value)
         except btle.BTLEException as e:
             logger.log_exception(
                 _LOGGER,
@@ -286,7 +291,7 @@ class ThermostatWorker(BaseWorker):
             )
             return []
 
-        return self.present_device_state(device_name, thermostat)
+        return retry(self.present_device_state, retries=self.command_retries, exception_type=btle.BTLEException)(device_name, thermostat)
 
     def present_device_state(self, name, thermostat):
         from eq3bt import Mode
